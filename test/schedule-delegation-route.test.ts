@@ -4,7 +4,7 @@ import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { authorizeSessionScopedIpc } from '../src/core/daemon-ipc-session-auth.js';
 import { dispatchCallerFromReply, scheduleCreateCapabilities } from '../src/core/dispatch-user-delegation.js';
-import { pickTurnReplyTarget } from '../src/core/reply-target.js';
+import { pickTurnReplyTarget, registryTurnMayAuthenticateHuman } from '../src/core/reply-target.js';
 import { computeInputHash } from '../src/utils/canonical-input-hash.js';
 import { SCHEDULE_DELEGATION_DEFAULT_MAX_TASKS_PER_TURN } from '../src/global-config.js';
 import { TRIGGER_USER_AUTH_TOOLS } from '../src/services/trigger-user-auth.js';
@@ -56,7 +56,7 @@ function harness(overrides: Record<string, unknown> = {}) {
     readGlobalConfig: () => ({ scheduleDelegation: { createEnabled: true } }),
     getBot: () => ({ config: { triggerUserAuth: { enabled: true,
       tools: ['lark-cli', 'bytedcli'] } } }),
-    pickTurnReplyTarget, dispatchCallerFromReply,
+    pickTurnReplyTarget, dispatchCallerFromReply, registryTurnMayAuthenticateHuman,
     dispatchUserForTurn: async () => ({
       domain: 'botmux.dispatch-user.v2', deliveryId: 'delivery-1', messageId: turnId,
       sourceSessionId: 'source-session', sourceAppId: 'cli_source', sourceTurnId: 'om_human',

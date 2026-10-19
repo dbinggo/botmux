@@ -476,7 +476,7 @@ import {
   signDispatchLaunchIpcResponse,
   verifyDispatchLaunchIpcRequest,
 } from './core/dispatch-launch-ipc-auth.js';
-import { beginReplyTargetTurn, buildTurnParticipantsFrom, chatSessionAnsweredRootAtTopLevel, fallbackTurnId, frozenReplyContextForTurn, isSubstituteTurn, pickTurnReplyTarget, resolveInboundReplyTarget, resolveSessionReplyTarget, syncReplyTargetState } from './core/reply-target.js';
+import { beginReplyTargetTurn, buildTurnParticipantsFrom, chatSessionAnsweredRootAtTopLevel, fallbackTurnId, frozenReplyContextForTurn, isSubstituteTurn, pickTurnReplyTarget, registryTurnMayAuthenticateHuman, resolveInboundReplyTarget, resolveSessionReplyTarget, syncReplyTargetState } from './core/reply-target.js';
 import { sameTrustedPrincipal } from './core/active-turn-authority.js';
 import { isSerialGroupInput, trustedSessionController } from './core/trusted-session-controller.js';
 import {
@@ -7443,17 +7443,16 @@ ipcRoute('POST', DISPATCH_USER_DELIVERY_ROUTE, async (req, res) => {
 });
 
 /** Resolve schedule control from the exact live turn, not the busy/idle hint.
- * The caller must still pass the route's managed-origin proof. Only an actual
- * IM message can recover its caller from reply metadata: synthetic continuation
- * turns may copy that metadata but do not represent a new human request.
- * Exception: `join_<uuid>` is the daemon-minted first turn of an
- * auto-start-on-join session — its registry entry is written at birth with the
- * operator who added the bot (see handleBotAdded), so it MAY resolve a caller;
- * other synthetic prefixes (bmx-recovery …) stay excluded. */
+ * The caller must still pass the route's managed-origin proof. Registry-based
+ * recovery of the caller follows the shared registryTurnMayAuthenticateHuman
+ * rule: real message turns and the daemon-minted auto-start join turn may
+ * resolve their recorded human; recovery continuations (their entry is a copy
+ * of the original turn's, not a new human request) and all other synthetic
+ * prefixes stay excluded. */
 function scheduleCallerForTurn(ds: DaemonSession, turnId: string): TrustedCaller | undefined {
   const active = ds.activeInteractiveTurn;
   if (active?.turnId === turnId) return active.caller;
-  if (!turnId.startsWith('om_') && !turnId.startsWith('join_')) return undefined;
+  if (!registryTurnMayAuthenticateHuman(ds.session, turnId)) return undefined;
   return dispatchCallerFromReply(ds.larkAppId, pickTurnReplyTarget(ds.session, turnId));
 }
 
@@ -24655,6 +24654,9 @@ async function handleBotAdded(
     // 首轮无真人入站消息，但 bot.added 事件本身携带操作人：把拉 bot 入群的
     // 人登记为本轮 sender，schedule 等需要当前轮真人身份的命令（创建/管理
     // 定时任务）据此归属到操作人，与 session.ownerOpenId 一致。
+    // isBot:false 是对 bot.added 操作人的直接断言（事件语义上操作人即拉群的
+    // 真人），不是身份解析结果；下游 schedule 管理路由还有 dashboard 管理员
+    // 名单硬门兜底。
     // participantsIncomplete 让 --mention-back 保持既有安全方向（窗口不完整 →
     // 要求显式 @），这条登记不改变回复时的 @ 行为。
     const joinTurnSenderOpts = operatorOpenId

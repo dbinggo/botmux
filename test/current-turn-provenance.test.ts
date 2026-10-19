@@ -316,6 +316,13 @@ describe('resolveCurrentTurnProvenance', () => {
     // that still names the running turn. This is the exact shape a
     // session-group (p2pMode=group) first turn takes: anchored on the bot's
     // in-group intro message while the user keeps messaging in the group.
+    const humanEntry = (openId: string, extra: Record<string, unknown> = {}) => ({
+      senderOpenId: openId,
+      participants: [{ openId, isBot: false }],
+      updatedAt: '2026-10-19T08:00:00.000Z',
+      ...extra,
+    });
+
     it('authenticates the running turn from the per-turn registry when quote slots moved on', () => {
       writeMarker('sess-1', 'om_intro_anchor');
       writeSession({
@@ -326,8 +333,8 @@ describe('resolveCurrentTurnProvenance', () => {
         lastCallerOpenId: 'ou_followup_sender',
         currentReplyTarget: { turnId: 'om_queued_followup' },
         replyTargets: {
-          om_intro_anchor: { senderOpenId: 'ou_caller_b', updatedAt: '2026-10-19T08:00:00.000Z' },
-          om_queued_followup: { senderOpenId: 'ou_followup_sender', updatedAt: '2026-10-19T08:01:00.000Z' },
+          om_intro_anchor: humanEntry('ou_caller_b'),
+          om_queued_followup: humanEntry('ou_followup_sender'),
         },
       });
 
@@ -347,12 +354,12 @@ describe('resolveCurrentTurnProvenance', () => {
     });
 
     it('keeps the thread-scope root on the registry fallback', () => {
-      writeMarker('sess-1', 'turn-current');
+      writeMarker('sess-1', 'om_turn_current');
       writeSession({
         quoteTargetId: 'om_queued_followup',
         lastCallerOpenId: 'ou_followup_sender',
         replyTargets: {
-          'turn-current': { senderOpenId: 'ou_caller_b', updatedAt: '2026-10-19T08:00:00.000Z' },
+          om_turn_current: humanEntry('ou_caller_b'),
         },
       });
 
@@ -363,18 +370,14 @@ describe('resolveCurrentTurnProvenance', () => {
     });
 
     it('uses the registry root for a chat-scope turn folded into a topic', () => {
-      writeMarker('sess-1', 'turn-current');
+      writeMarker('sess-1', 'om_turn_current');
       writeSession({
         scope: 'chat',
         chatType: 'group',
         quoteTargetId: 'om_queued_followup',
         currentReplyTarget: { turnId: 'om_queued_followup', rootMessageId: 'om_other_root' },
         replyTargets: {
-          'turn-current': {
-            senderOpenId: 'ou_caller_b',
-            rootMessageId: 'om_alias_root',
-            updatedAt: '2026-10-19T08:00:00.000Z',
-          },
+          om_turn_current: humanEntry('ou_caller_b', { rootMessageId: 'om_alias_root' }),
         },
       });
 
@@ -385,11 +388,11 @@ describe('resolveCurrentTurnProvenance', () => {
     });
 
     it('still fails closed when the registry has no record of the marker turn', () => {
-      writeMarker('sess-1', 'turn-stale');
+      writeMarker('sess-1', 'om_turn_stale');
       writeSession({
         quoteTargetId: 'om_queued_followup',
         replyTargets: {
-          om_queued_followup: { senderOpenId: 'ou_caller_b', updatedAt: '2026-10-19T08:01:00.000Z' },
+          om_queued_followup: humanEntry('ou_caller_b'),
         },
       });
 
@@ -397,16 +400,34 @@ describe('resolveCurrentTurnProvenance', () => {
         dataDir,
         envSessionId: 'sess-1',
         startPid: process.pid,
-      })).toThrow(/turn-stale.*om_queued_followup/);
+      })).toThrow(/om_turn_stale.*om_queued_followup/);
     });
 
     it('fails closed when the registry entry carries no human sender', () => {
-      writeMarker('sess-1', 'turn-current');
+      writeMarker('sess-1', 'om_turn_current');
       writeSession({
         quoteTargetId: 'om_queued_followup',
         replyTargets: {
-          'turn-current': { updatedAt: '2026-10-19T08:00:00.000Z' },
+          om_turn_current: { updatedAt: '2026-10-19T08:00:00.000Z' },
         },
+      });
+
+      expect(() => resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toThrow(/缺少 senderOpenId/);
+    });
+
+    it.each([
+      ['participants missing', { senderOpenId: 'ou_caller_b', updatedAt: '2026-10-19T08:00:00.000Z' }],
+      ['sender marked bot in the window', { senderOpenId: 'ou_caller_b', participants: [{ openId: 'ou_caller_b', isBot: true }], updatedAt: '2026-10-19T08:00:00.000Z' }],
+    ])('fails closed when the human proof is absent: %s', (_label, entry) => {
+      // Converged with dispatchCallerFromReply: sender alone is not enough.
+      writeMarker('sess-1', 'om_turn_current');
+      writeSession({
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: { om_turn_current: entry },
       });
 
       expect(() => resolveCurrentTurnProvenance({
@@ -428,10 +449,7 @@ describe('resolveCurrentTurnProvenance', () => {
         rootMessageId: undefined,
         quoteTargetId: undefined,
         replyTargets: {
-          [joinTurnId]: {
-            senderOpenId: 'ou_owner_a',
-            updatedAt: '2026-10-19T08:00:00.000Z',
-          },
+          [joinTurnId]: humanEntry('ou_owner_a'),
         },
       });
 
@@ -448,6 +466,71 @@ describe('resolveCurrentTurnProvenance', () => {
         chatId: 'oc_real',
         chatType: 'group',
       });
+    });
+
+    it('rejects an ordinary-recovery continuation whose registry entry is a clone', () => {
+      // ordinary-turn-recovery structuredClones the original entry onto the
+      // bmx-recovery-* turn id — a copied identity is not a new human request.
+      const recoveryTurnId = 'bmx-recovery-aaaabbbb';
+      writeMarker('sess-1', recoveryTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: {
+          om_original_turn: humanEntry('ou_caller_b'),
+          [recoveryTurnId]: humanEntry('ou_caller_b'),
+        },
+        ordinaryTurnRecovery: { logicalTurnId: 'om_original_turn', currentTurnId: recoveryTurnId },
+      });
+
+      expect(() => resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toThrow(/bmx-recovery-aaaabbbb.*om_queued_followup/);
+    });
+
+    it('rejects a failed-turn recovery redispatch, user-triggered retry included', () => {
+      // failed-turn-recovery writes senderOpenId + isBot:false participants onto
+      // the bmx-recovery-* entry. Fail closed regardless of retry vs fresh until
+      // a maintainer decides explicit retry should re-authenticate.
+      const recoveryTurnId = 'bmx-recovery-ccccdddd';
+      writeMarker('sess-1', recoveryTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: {
+          [recoveryTurnId]: humanEntry('ou_caller_b'),
+        },
+        failedTurnRecovery: { originalTurnId: 'om_original_turn', turnId: recoveryTurnId },
+      });
+
+      expect(() => resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toThrow(/bmx-recovery-ccccdddd.*om_queued_followup/);
+    });
+
+    it('rejects other synthetic turn ids even with a sender-ful registry entry', () => {
+      const triggerTurnId = 'trg_9f2b1caa-0000-4000-8000-000000000000';
+      writeMarker('sess-1', triggerTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: {
+          [triggerTurnId]: humanEntry('ou_caller_b'),
+        },
+      });
+
+      expect(() => resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toThrow(CurrentTurnProvenanceError);
     });
   });
 });
