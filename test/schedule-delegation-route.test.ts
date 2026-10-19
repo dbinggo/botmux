@@ -380,6 +380,49 @@ describe('direct schedule creation after the active-turn hint is cleared', () =>
   });
 });
 
+describe('auto-start-on-join first turn (join_ synthetic id)', () => {
+  const JOIN_TURN_ID = 'join_9f2b1caa-0000-4000-8000-000000000000';
+  function joinHarness() {
+    const h = directHumanHarness();
+    h.ds.managedTurnOrigin.turnId = h.body.originTurnId = JOIN_TURN_ID;
+    // The registry entry handleBotAdded writes at session birth: the operator
+    // who added the bot, with the mention-safe incomplete window marker.
+    h.ds.session.replyTargets = {
+      [JOIN_TURN_ID]: {
+        senderOpenId: 'ou_user_target',
+        participants: [{ openId: 'ou_user_target', isBot: false }],
+        participantsIncomplete: true,
+        updatedAt: '2026-10-19T00:00:00.000Z',
+      },
+    };
+    return h;
+  }
+
+  it('resolves the operator who added the bot as the direct human creator', async () => {
+    const h = joinHarness();
+    expect(await h.run()).toMatchObject({ status: 201, value: { task: {
+      ownerOpenId: 'ou_user_target', ownerUnionId: 'on_user',
+    } } });
+    expect(h.scope.scheduler.addTask).toHaveBeenCalledOnce();
+    expect(h.commitDelegatedTask).not.toHaveBeenCalled();
+  });
+
+  it('still fails closed when the join turn entry carries no human sender', async () => {
+    const h = joinHarness();
+    h.ds.session.replyTargets = { [JOIN_TURN_ID]: { updatedAt: '2026-10-19T00:00:00.000Z' } };
+    expect(await h.run()).toMatchObject({ status: 403, value: { error: 'schedule_delegation_disabled' } });
+    expect(h.scope.scheduler.addTask).not.toHaveBeenCalled();
+  });
+
+  it.each(['bmx-recovery-123', 'schedule:a1b2c3d4:run'])('keeps other synthetic prefixes excluded: %s', async turnId => {
+    const h = joinHarness();
+    h.ds.session.replyTargets[turnId] = h.ds.session.replyTargets[JOIN_TURN_ID];
+    h.ds.managedTurnOrigin.turnId = h.body.originTurnId = turnId;
+    expect(await h.run()).toMatchObject({ status: 403, value: { error: 'schedule_delegation_disabled' } });
+    expect(h.scope.scheduler.addTask).not.toHaveBeenCalled();
+  });
+});
+
 // Exercise the production IPC cases as well as the production route. External
 // side effects are stubbed; no live worker or daemon is started by this test.
 it('creates after same-turn revoke/republication without reviving the busy hint', async () => {

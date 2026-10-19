@@ -119,6 +119,12 @@ describe('daemon per-turn reply sender + participant wiring', () => {
   });
 
   it('does not invent a sender for scheduled or system-created turns', () => {
-    expect(daemonSource).toContain('beginReplyTargetTurn(ds, sharedReplyRootId, sharedReplyRootId, new Date(now).toISOString());');
+    // 自动开工（bot.added）首轮是唯一例外，但它不是「发明」sender：登记的是
+    // 事件里真实的操作人（拉 bot 入群的人），且以 operatorOpenId 存在为条件；
+    // participantsIncomplete 让 --mention-back 保持显式 @ 的安全方向。
+    // schedule / recovery 等其它系统轮次仍然没有 sender。
+    expect(daemonSource).toMatch(/const joinTurnSenderOpts = operatorOpenId\n\s+\? \{/);
+    expect(daemonSource).toMatch(/participantsIncomplete: true,\n\s+\}\n\s+: \{\};/);
+    expect(daemonSource).toContain('beginReplyTargetTurn(ds, sharedReplyRootId, sharedReplyRootId, new Date(now).toISOString(), joinTurnSenderOpts);');
   });
 });

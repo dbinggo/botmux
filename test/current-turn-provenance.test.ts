@@ -415,5 +415,39 @@ describe('resolveCurrentTurnProvenance', () => {
         startPid: process.pid,
       })).toThrow(/缺少 senderOpenId/);
     });
+
+    it('authenticates an auto-start-on-join turn as the operator who added the bot', () => {
+      // handleBotAdded's synthetic first turn: no inbound message at all, so
+      // quoteTargetId is unset; the birth-time registry entry carries the
+      // operator (see the joinTurnSenderOpts registration in daemon.ts).
+      const joinTurnId = 'join_9f2b1caa-0000-4000-8000-000000000000';
+      writeMarker('sess-1', joinTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        rootMessageId: undefined,
+        quoteTargetId: undefined,
+        replyTargets: {
+          [joinTurnId]: {
+            senderOpenId: 'ou_owner_a',
+            updatedAt: '2026-10-19T08:00:00.000Z',
+          },
+        },
+      });
+
+      expect(resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toEqual({
+        sessionId: 'sess-1',
+        turnId: joinTurnId,
+        // The registry's operator, not the session's lastCallerOpenId slot.
+        callerOpenId: 'ou_owner_a',
+        larkAppId: 'cli_real',
+        chatId: 'oc_real',
+        chatType: 'group',
+      });
+    });
   });
 });
