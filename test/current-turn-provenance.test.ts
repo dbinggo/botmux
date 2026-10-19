@@ -308,4 +308,112 @@ describe('resolveCurrentTurnProvenance', () => {
       })).toThrow(/turn-stale.*turn-current/);
     });
   });
+
+  describe('queued follow-up window (type-ahead)', () => {
+    // submitQueuedMessage advances the single quote/reply slots to the queued
+    // message as soon as it is accepted, while the running turn's marker still
+    // points at this turn's anchor. The per-turn registry is the only record
+    // that still names the running turn. This is the exact shape a
+    // session-group (p2pMode=group) first turn takes: anchored on the bot's
+    // in-group intro message while the user keeps messaging in the group.
+    it('authenticates the running turn from the per-turn registry when quote slots moved on', () => {
+      writeMarker('sess-1', 'om_intro_anchor');
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        rootMessageId: undefined,
+        quoteTargetId: 'om_queued_followup',
+        lastCallerOpenId: 'ou_followup_sender',
+        currentReplyTarget: { turnId: 'om_queued_followup' },
+        replyTargets: {
+          om_intro_anchor: { senderOpenId: 'ou_caller_b', updatedAt: '2026-10-19T08:00:00.000Z' },
+          om_queued_followup: { senderOpenId: 'ou_followup_sender', updatedAt: '2026-10-19T08:01:00.000Z' },
+        },
+      });
+
+      expect(resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toEqual({
+        sessionId: 'sess-1',
+        turnId: 'om_intro_anchor',
+        // THIS turn's recorded sender, not the queued follow-up's.
+        callerOpenId: 'ou_caller_b',
+        larkAppId: 'cli_real',
+        chatId: 'oc_real',
+        chatType: 'group',
+      });
+    });
+
+    it('keeps the thread-scope root on the registry fallback', () => {
+      writeMarker('sess-1', 'turn-current');
+      writeSession({
+        quoteTargetId: 'om_queued_followup',
+        lastCallerOpenId: 'ou_followup_sender',
+        replyTargets: {
+          'turn-current': { senderOpenId: 'ou_caller_b', updatedAt: '2026-10-19T08:00:00.000Z' },
+        },
+      });
+
+      expect(resolveCurrentTurnProvenance({ dataDir, startPid: process.pid })).toMatchObject({
+        callerOpenId: 'ou_caller_b',
+        rootMessageId: 'om_real_root',
+      });
+    });
+
+    it('uses the registry root for a chat-scope turn folded into a topic', () => {
+      writeMarker('sess-1', 'turn-current');
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: 'om_queued_followup',
+        currentReplyTarget: { turnId: 'om_queued_followup', rootMessageId: 'om_other_root' },
+        replyTargets: {
+          'turn-current': {
+            senderOpenId: 'ou_caller_b',
+            rootMessageId: 'om_alias_root',
+            updatedAt: '2026-10-19T08:00:00.000Z',
+          },
+        },
+      });
+
+      expect(resolveCurrentTurnProvenance({ dataDir, startPid: process.pid })).toMatchObject({
+        callerOpenId: 'ou_caller_b',
+        rootMessageId: 'om_alias_root',
+      });
+    });
+
+    it('still fails closed when the registry has no record of the marker turn', () => {
+      writeMarker('sess-1', 'turn-stale');
+      writeSession({
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: {
+          om_queued_followup: { senderOpenId: 'ou_caller_b', updatedAt: '2026-10-19T08:01:00.000Z' },
+        },
+      });
+
+      expect(() => resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toThrow(/turn-stale.*om_queued_followup/);
+    });
+
+    it('fails closed when the registry entry carries no human sender', () => {
+      writeMarker('sess-1', 'turn-current');
+      writeSession({
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: {
+          'turn-current': { updatedAt: '2026-10-19T08:00:00.000Z' },
+        },
+      });
+
+      expect(() => resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toThrow(/缺少 senderOpenId/);
+    });
+  });
 });

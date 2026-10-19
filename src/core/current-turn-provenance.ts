@@ -20,6 +20,14 @@ interface PersistedTurnSession {
     rootMessageId?: string;
     turnId?: string;
   };
+  /** Durable per-turn registry written by the daemon at turn begin. Unlike the
+   * single quote/reply slots it is NOT advanced by queued follow-ups, so it is
+   * the only slot that still names the running turn once a type-ahead message
+   * has been folded into the session. */
+  replyTargets?: Record<string, {
+    rootMessageId?: string;
+    senderOpenId?: string;
+  }>;
 }
 
 export interface CurrentTurnProvenance {
@@ -187,18 +195,41 @@ export function resolveCurrentTurnProvenance(
     };
   }
 
-  if (!nonEmpty(session.quoteTargetId) || session.quoteTargetId !== marker.turnId) {
+  // quoteTargetId / currentReplyTarget are the live UI quote chain: a queued
+  // follow-up (submitQueuedMessage) advances both to the NEXT turn's message
+  // while this turn is still running, so they cannot vouch for the running
+  // turn on their own — Session.quoteTargetId is documented as "never
+  // authority for a queued/running turn". When the generation join on them
+  // fails, fall back to the durable per-turn registry, which keeps the running
+  // turn's own record (sender included) until the turn ends. The process
+  // marker already proves the CLI runs inside THIS turn's worker, and the
+  // registry entry was written by the daemon at this turn's begin, so binding
+  // identity to it does not widen the trust boundary; a turn with no registry
+  // record still fails closed exactly as before.
+  const turnEntry = session.replyTargets?.[marker.turnId];
+  const quoteJoinHolds = nonEmpty(session.quoteTargetId) && session.quoteTargetId === marker.turnId;
+  const slotJoinHolds = !!replyTarget && nonEmpty(replyTarget.turnId) && replyTarget.turnId === marker.turnId;
+  if (!quoteJoinHolds && !turnEntry) {
     throw new CurrentTurnProvenanceError(
       `进程标记 turn ${marker.turnId} 与 session 当前 quote turn ${session.quoteTargetId ?? '(missing)'} 不一致`,
     );
   }
-  if (replyTarget && (!nonEmpty(replyTarget.turnId) || replyTarget.turnId !== marker.turnId)) {
+  if (replyTarget && !slotJoinHolds && !turnEntry) {
     throw new CurrentTurnProvenanceError(
       `进程标记 turn ${marker.turnId} 与 session 当前 reply turn ${replyTarget.turnId ?? '(missing)'} 不一致`,
     );
   }
-  if (!nonEmpty(session.lastCallerOpenId)) {
-    throw new CurrentTurnProvenanceError(`session ${marker.sessionId} 缺少 lastCallerOpenId`);
+  // Identity comes from the join that actually held: the live quote chain
+  // names the latest inbound sender, the registry names THIS turn's sender —
+  // in an oncall group the two can differ, and only the latter opened this
+  // turn.
+  const callerOpenId = quoteJoinHolds ? session.lastCallerOpenId : turnEntry?.senderOpenId;
+  if (!nonEmpty(callerOpenId)) {
+    throw new CurrentTurnProvenanceError(
+      quoteJoinHolds
+        ? `session ${marker.sessionId} 缺少 lastCallerOpenId`
+        : `session ${marker.sessionId} 的 turn ${marker.turnId} 登记缺少 senderOpenId`,
+    );
   }
 
   let rootMessageId: string | undefined;
@@ -207,17 +238,19 @@ export function resolveCurrentTurnProvenance(
       throw new CurrentTurnProvenanceError(`thread session ${marker.sessionId} 缺少 rootMessageId`);
     }
     rootMessageId = session.rootMessageId;
-  } else if (replyTarget) {
-    if (!nonEmpty(replyTarget.rootMessageId)) {
+  } else if (slotJoinHolds) {
+    if (!nonEmpty(replyTarget!.rootMessageId)) {
       throw new CurrentTurnProvenanceError(`chat session ${marker.sessionId} 的当前 reply target 缺少 rootMessageId`);
     }
-    rootMessageId = replyTarget.rootMessageId;
+    rootMessageId = replyTarget!.rootMessageId;
+  } else if (!quoteJoinHolds && nonEmpty(turnEntry?.rootMessageId)) {
+    rootMessageId = turnEntry.rootMessageId;
   }
 
   return {
     sessionId: marker.sessionId,
     turnId: marker.turnId,
-    callerOpenId: session.lastCallerOpenId,
+    callerOpenId,
     larkAppId: session.larkAppId,
     chatId: session.chatId,
     ...(session.chatType === 'group' || session.chatType === 'p2p'
