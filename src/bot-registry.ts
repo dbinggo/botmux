@@ -13,7 +13,8 @@ import {
   normalizeScratchStorage,
   type SandboxMode,
 } from './adapters/cli/sandbox-mode.js';
-import type { BackendType } from './adapters/backend/types.js';
+import type { BackendType, HerdrBackendConfig } from './adapters/backend/types.js';
+import { normalizeHerdrBackendConfig } from './adapters/backend/types.js';
 import { normalizeMojoConfig, type MojoConfig } from './adapters/backend/mojo-types.js';
 import type { RiffBackendConfig } from './adapters/backend/riff-backend.js';
 import {
@@ -40,6 +41,7 @@ import { normalizeGroupDefaultModels, type GroupDefaultModels } from './core/gro
 import type { PricingOverrides } from './services/model-pricing.js';
 import type { BudgetConfig } from './services/budget-tracker.js';
 import { normalizePricingOverrides } from './services/model-pricing.js';
+import { normalizeCardFooterExtension, type CardFooterExtensionConfig } from './services/card-footer-extension.js';
 import { parseTriggerUserAuthConfig } from './services/trigger-user-auth.js';
 import { parseBudgetConfig } from './services/budget-tracker.js';
 import { type Brand, sdkDomain, normalizeBrand } from './im/lark/lark-hosts.js';
@@ -1773,6 +1775,14 @@ export interface BotConfig {
   riff?: RiffBackendConfig;
 
   /**
+   * Configuration for the herdr backend. Optional even when `backendType` is
+   * `'herdr'`: default placement uses machine-wide managed 'botmux' host session.
+   * Can target an existing host session (e.g. 'default') and place panes into
+   * specific tabs or workspaces.
+   */
+  herdr?: HerdrBackendConfig;
+
+  /**
    * Configuration for the mojo backend (@byted/mojo headless CLI). Optional
    * even when `backendType` is `'mojo'`: every field has a working default
    * (`mojo` on PATH + an ambient login is a valid setup). Use it to pin the
@@ -2217,6 +2227,13 @@ export interface BotConfig {
    */
   autoStartOnGroupJoin?: boolean;
   /**
+   * Require at least one matching `chat.bot_added` sync hook to allow before
+   * group-join auto-start may create a session or visible seed. Missing,
+   * invalid or unmatched hook config therefore fails closed. Default off keeps
+   * the historical allowedUsers-only behaviour.
+   */
+  autoStartOnGroupJoinGateRequired?: boolean;
+  /**
    * 主动开工 — 场景① optional pre-configured first-turn prompt. When set, it
    * becomes the user_message of the auto-started session; when unset/blank the
    * session starts with an empty user_message and the bot reads the group
@@ -2261,6 +2278,14 @@ export interface BotConfig {
    * Default (undefined) = passive.
    */
   autoStartOnNewTopic?: boolean;
+  /**
+   * 群负责人（默认接待者）总开关。仅当显式为 true 时：
+   *   - 本 bot 在普通群顶层可凭群负责人身份免 @ 接话；
+   *   - 会话内才向模型提供 `botmux-chat-manager` skill，并允许 `manager set`。
+   * 默认（undefined/false）= 关闭，老用户行为完全不变。`manager clear`/`status`
+   * 不被此开关阻断（拆除与只读始终允许）。
+   */
+  chatManagerEnabled?: boolean;
   /** Chat IDs excluded from group-join and new-topic auto-start (explicit requests still work). */
   autoStartExcludedChats?: string[];
   /** Bot-wide default listener. It applies to every joined group without an override. */
@@ -2372,6 +2397,12 @@ export interface BotConfig {
    * model price table. See services/model-pricing.ts.
    */
   pricing?: PricingOverrides;
+  /**
+   * Custom text segments appended to the card usage line, produced by an
+   * external command the daemon runs on a timer (shared by all of this bot's
+   * sessions). See services/card-footer-extension.ts.
+   */
+  cardFooterExtension?: CardFooterExtensionConfig;
   /**
    * Per-bot monthly budget config. When set, the daemon tracks spend and
    * alerts/blocks at thresholds. See services/budget-tracker.ts.
@@ -3903,6 +3934,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     // 非法项丢弃，全空返回 undefined。
     const pricing = normalizePricingOverrides(entry.pricing);
 
+    // cardFooterExtension：卡片用量段的外部命令扩展；command 缺失 / 非法 ⇒ undefined。
+    const cardFooterExtension = normalizeCardFooterExtension(entry.cardFooterExtension);
+
     // budget：per-bot 月度预算。parseBudgetConfig 做宽松校验，
     // 非法/缺字段返回 null。
     const budget = parseBudgetConfig(entry.budget);
@@ -4030,6 +4064,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       readDenyExtraPaths: normalizeStringList(entry.readDenyExtraPaths),
       backendType: entry.backendType,
       riff: entry.riff && typeof entry.riff === 'object' ? entry.riff : undefined,
+      herdr: normalizeHerdrBackendConfig(entry.herdr),
       mojo: entry.mojo && typeof entry.mojo === 'object' ? entry.mojo : undefined,
       // Positive integer only; ≤0 / non-int / absent → undefined (= no cap).
       maxLiveWorkers: typeof entry.maxLiveWorkers === 'number'
@@ -4166,6 +4201,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // 平台团队展示默认 ON：只有显式 false 有意义/落盘（undefined = 展示）。
       showInTeam: entry.showInTeam === false ? false : undefined,
       autoStartOnGroupJoin: entry.autoStartOnGroupJoin === true || undefined,
+      autoStartOnGroupJoinGateRequired: entry.autoStartOnGroupJoinGateRequired === true || undefined,
       // Default ON: only an explicit false is meaningful/persisted (undefined = on).
       autoInviteOwnerOnGroupAdd: entry.autoInviteOwnerOnGroupAdd === false ? false : undefined,
       // Preserve the configured prompt verbatim; trim-to-undefined when blank
@@ -4179,6 +4215,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         ? entry.autoStartOnGroupJoinSeed
         : undefined,
       autoStartOnNewTopic: entry.autoStartOnNewTopic === true || undefined,
+      chatManagerEnabled: entry.chatManagerEnabled === true || undefined,
       autoStartExcludedChats: Array.isArray(entry.autoStartExcludedChats) ? entry.autoStartExcludedChats.filter((id: unknown): id is string => typeof id === 'string') : undefined,
       groupJoinCommandEnabled: entry.groupJoinCommandEnabled === true || undefined,
       groupJoinCommand: typeof entry.groupJoinCommand === 'string' && entry.groupJoinCommand.trim()
@@ -4232,6 +4269,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       contentTriggers,
       voice,
       pricing,
+      cardFooterExtension,
       budget: budget ?? undefined,
     };
     const nativeSubagentRuntimeStatus: NativeSubagentRuntimeConfigState['status'] =
