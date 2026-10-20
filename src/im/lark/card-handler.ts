@@ -81,7 +81,7 @@ import { AutoWorktreeFailClosedError } from '../../services/default-worktree.js'
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
 import { resumeStartsFresh } from '../../services/resume-fresh-policy.js';
 import { cliHasNoRawPassthroughSurface } from '../../core/passthrough-commands.js';
-import { setSessionReasoningEffort, forkWorker, sendWorkerInput, sendWorkerSessionInput, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock, freezeSessionSandboxDecision, buildStreamingCardJson, idleCardLabel, dshRuntimeForSession, type WorkerSessionReplyOptions, postFreshStreamingCard, displayableStreamingCardImageKey, canExpectFreshStreamingScreenshot, restoreStreamingCardIdentityFromProof } from '../../core/worker-pool.js';
+import { setSessionReasoningEffort, forkWorker, sendWorkerInput, sendWorkerSessionInput, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock, freezeSessionSandboxDecision, buildStreamingCardJson, idleCardLabel, dshRuntimeForSession, type WorkerSessionReplyOptions, postFreshStreamingCard, displayableStreamingCardImageKey, canExpectFreshStreamingScreenshot, restoreStreamingCardIdentityFromProof, streamingCardPresentationImageKey } from '../../core/worker-pool.js';
 import { reconcileResumedStreamingCard } from '../../core/resume-streaming-card.js';
 import { getSessionWorkingDir, buildNewTopicCliInput, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput, ensureSessionWhiteboard } from '../../core/session-manager.js';
 import { markInitialUserTurnPending } from '../../core/initial-user-turn.js';
@@ -98,6 +98,7 @@ import type { ProjectInfo } from '../../services/project-scanner.js';
 import { createRepoWorktree, removeRepoWorktree, dirSuffixForBranch, pushWorktreeBranch } from '../../services/git-worktree.js';
 import { withCodexAppContext } from '../../utils/codex-app-context.js';
 import { handleCommand } from '../../core/command-handler.js';
+import { DISMISS_CONFIRM_ACTION, buildDismissSubmittedCard } from './dismiss-card.js';
 import { isRemoteBackendSession, resolvePairedSpawnBackendType } from '../../core/persistent-backend.js';
 import { sessionConfiguredRuntimeDisplayName } from '../../core/cli-runtime-display.js';
 import { worktreeSlugFromContextAI } from '../../services/worktree-slug-ai.js';
@@ -1605,6 +1606,42 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       getActiveCount: () => activeSessions.size,
     }, larkAppId);
     return { toast: { type: 'success', content: t('cmd.close.worktree_confirm_received', undefined, localeForBot(larkAppId)) } };
+  }
+
+  if (value?.action === DISMISS_CONFIRM_ACTION) {
+    const loc = localeForBot(larkAppId);
+    const chatId = String(value.chat_id ?? '');
+    const confirmationState = String(value.confirmation_state ?? '');
+    if (!chatId || !/^[a-f0-9]{64}$/.test(confirmationState) || !larkAppId || !operatorOpenId) {
+      return { toast: { type: 'warning', content: t('card.action.session_gone', undefined, loc) } };
+    }
+    // The state hash is bound to the invoker; reject others before the card
+    // is replaced, so a stray click cannot hide the owner's button.
+    if (String(value.invoker_open_id ?? '') !== operatorOpenId) {
+      return { toast: { type: 'error', content: t('cmd.close.worktree_confirm_not_invoker', undefined, loc) } };
+    }
+    // Closing several sessions can outlast the 3s callback window: swap the
+    // card first, then run the same path as a typed `/dismiss --confirm=`,
+    // which re-checks permission and state and reports into the group.
+    return {
+      card: { type: 'raw', data: buildDismissSubmittedCard(loc) },
+      afterAck: () => handleCommand('/dismiss', chatId, {
+        messageId: cardMessageId ?? `dismiss-confirm-${chatId}`,
+        rootId: chatId,
+        chatId,
+        chatType: 'group',
+        senderId: operatorOpenId,
+        senderType: 'user',
+        msgType: 'interactive',
+        content: `/dismiss --confirm=${confirmationState}`,
+        createTime: String(Date.now()),
+      }, {
+        activeSessions,
+        sessionReply: deps.sessionReply,
+        lastRepoScan,
+        getActiveCount: () => activeSessions.size,
+      }, larkAppId),
+    };
   }
 
   if (isAskCardAction(value?.action)) {
@@ -3304,7 +3341,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           sessionCliId(ds),
           ds.displayMode ?? 'hidden',
           ds.streamCardNonce,
-          ds.currentImageKey,
+          streamingCardPresentationImageKey(ds),
           isSharedAdoptSession(ds),
           false,
           locDs,
@@ -4099,7 +4136,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           effectiveCliId,
           ds.displayMode ?? 'screenshot',
           ds.streamCardNonce,
-          ds.currentImageKey,
+          streamingCardPresentationImageKey(ds),
           isSharedAdoptSession(ds),
           false,
           localeForBot(ds.larkAppId),
@@ -4233,7 +4270,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         senderOpenId: operatorOpenId,
         senderIsBot: false,
         messageId: cardMessageId ?? `compact-${Date.now()}`,
-        replyRootId: rootId,
+        // A chat-scope card's root_id is the chat id, not a message: passing it
+        // on would freeze an unreplyable thread target for this turn.
+        replyRootId: ds.scope === 'chat' ? undefined : rootId,
       });
       logger.info(`[${tag(ds)}] compact_session: /compact passthrough sent`);
       return { toast: { type: 'success', content: t('card.action.compact_sent', { cliName: sessionCliDisplayName(ds) }, locDs) } };
@@ -4269,7 +4308,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           effectiveCliId,
           ds.displayMode ?? 'screenshot',
           ds.streamCardNonce,
-          ds.currentImageKey,
+          streamingCardPresentationImageKey(ds),
           isSharedAdoptSession(ds),
           false,
           localeForBot(ds.larkAppId),
