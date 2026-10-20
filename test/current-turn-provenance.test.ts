@@ -470,8 +470,11 @@ describe('resolveCurrentTurnProvenance', () => {
 
     it('rejects an ordinary-recovery continuation whose registry entry is a clone', () => {
       // ordinary-turn-recovery structuredClones the original entry onto the
-      // bmx-recovery-* turn id — a copied identity is not a new human request.
-      const recoveryTurnId = 'bmx-recovery-aaaabbbb';
+      // continuation turn id — a copied identity is not a new human request.
+      // The om_-shaped id is deliberate: with a bmx-* id the prefix gate alone
+      // would reject, and the structural exclusion line could be deleted
+      // without any test going red (R2 mutation finding).
+      const recoveryTurnId = 'om_recovery_continuation';
       writeMarker('sess-1', recoveryTurnId);
       writeSession({
         scope: 'chat',
@@ -488,14 +491,15 @@ describe('resolveCurrentTurnProvenance', () => {
         dataDir,
         envSessionId: 'sess-1',
         startPid: process.pid,
-      })).toThrow(/bmx-recovery-aaaabbbb.*om_queued_followup/);
+      })).toThrow(/om_recovery_continuation.*om_queued_followup/);
     });
 
     it('rejects a failed-turn recovery redispatch, user-triggered retry included', () => {
       // failed-turn-recovery writes senderOpenId + isBot:false participants onto
-      // the bmx-recovery-* entry. Fail closed regardless of retry vs fresh until
-      // a maintainer decides explicit retry should re-authenticate.
-      const recoveryTurnId = 'bmx-recovery-ccccdddd';
+      // the recovery entry. Fail closed regardless of retry vs fresh until a
+      // maintainer decides explicit retry should re-authenticate. om_-shaped id
+      // for the same mutation-visibility reason as the ordinary case above.
+      const recoveryTurnId = 'om_recovery_redispatch';
       writeMarker('sess-1', recoveryTurnId);
       writeSession({
         scope: 'chat',
@@ -511,7 +515,144 @@ describe('resolveCurrentTurnProvenance', () => {
         dataDir,
         envSessionId: 'sess-1',
         startPid: process.pid,
-      })).toThrow(/bmx-recovery-ccccdddd.*om_queued_followup/);
+      })).toThrow(/om_recovery_redispatch.*om_queued_followup/);
+    });
+
+    it('still authenticates a normal om_ turn while its ordinary recovery is merely armed', () => {
+      // Load-bearing: beginOrdinaryTurnRecovery arms EVERY ordinary om_ turn
+      // with logicalTurnId === currentTurnId. Deleting the
+      // `turnId !== ordinary.logicalTurnId` half would fail-close every live
+      // claude-code session — this positive case goes red on that mutation.
+      const liveTurnId = 'om_live_turn';
+      writeMarker('sess-1', liveTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: {
+          [liveTurnId]: humanEntry('ou_caller_b'),
+        },
+        ordinaryTurnRecovery: { logicalTurnId: liveTurnId, currentTurnId: liveTurnId },
+      });
+
+      expect(resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toMatchObject({ turnId: liveTurnId, callerOpenId: 'ou_caller_b' });
+    });
+
+    it('rejects a readonly task continuation whose registry entry is a clone', () => {
+      // readonly-task-continuation structuredClones the original entry (sender
+      // + isBot:false participants) onto the continuation turn id, exactly like
+      // ordinary recovery — the third recovery family in the predicate.
+      const continuationTurnId = 'om_readonly_continuation';
+      writeMarker('sess-1', continuationTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: {
+          om_original_turn: humanEntry('ou_caller_b'),
+          [continuationTurnId]: humanEntry('ou_caller_b'),
+        },
+        readonlyTaskContinuation: { logicalTurnId: 'om_original_turn', currentTurnId: continuationTurnId },
+      });
+
+      expect(() => resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toThrow(/om_readonly_continuation.*om_queued_followup/);
+    });
+
+    it('still authenticates a normal readonly fire turn while its continuation is merely armed', () => {
+      const liveTurnId = 'om_readonly_fire_turn';
+      writeMarker('sess-1', liveTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: {
+          [liveTurnId]: humanEntry('ou_caller_b'),
+        },
+        readonlyTaskContinuation: { logicalTurnId: liveTurnId, currentTurnId: liveTurnId },
+      });
+
+      expect(resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toMatchObject({ turnId: liveTurnId, callerOpenId: 'ou_caller_b' });
+    });
+
+    it('rejects a join_ turn redispatched by failed-turn recovery', () => {
+      // The structural failed-turn exclusion wins over the join_ allowance.
+      const joinTurnId = 'join_9f2b1caa-0000-4000-8000-000000000000';
+      writeMarker('sess-1', joinTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: 'om_queued_followup',
+        replyTargets: {
+          [joinTurnId]: humanEntry('ou_owner_a'),
+        },
+        failedTurnRecovery: { originalTurnId: 'om_original_turn', turnId: joinTurnId },
+      });
+
+      expect(() => resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toThrow(CurrentTurnProvenanceError);
+    });
+
+    it('accepts a cascade-derived turn om_<msgId>#cN as its real passthrough sender', () => {
+      // Accepted relaxation (see PR description): one message carrying several
+      // passthrough commands derives om_<messageId>#c1..#cN-1 turns. The daemon
+      // writes the registry entry under the derived id with the real sender —
+      // not a clone — while the quote slot keeps the original message id.
+      const derivedTurnId = 'om_real_msg#c1';
+      writeMarker('sess-1', derivedTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: 'om_real_msg',
+        lastCallerOpenId: 'ou_followup_sender',
+        replyTargets: {
+          [derivedTurnId]: humanEntry('ou_caller_b'),
+        },
+      });
+
+      expect(resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toMatchObject({ turnId: derivedTurnId, callerOpenId: 'ou_caller_b' });
+    });
+
+    it('accepts a completion-proposal continuation om_<32hex> as the accepting requester', () => {
+      // Accepted relaxation (see PR description): proposal continuation mints
+      // an om_-shaped id from cp_<32hex>; the continuation deliberately leaves
+      // the quote slot unset, and the registry entry carries the requester whose
+      // accept click was server-side verified (requester === operator).
+      const proposalTurnId = 'om_0123456789abcdef0123456789abcdef';
+      writeMarker('sess-1', proposalTurnId);
+      writeSession({
+        scope: 'chat',
+        chatType: 'group',
+        quoteTargetId: undefined,
+        lastCallerOpenId: undefined,
+        replyTargets: {
+          [proposalTurnId]: humanEntry('ou_requester'),
+        },
+      });
+
+      expect(resolveCurrentTurnProvenance({
+        dataDir,
+        envSessionId: 'sess-1',
+        startPid: process.pid,
+      })).toMatchObject({ turnId: proposalTurnId, callerOpenId: 'ou_requester' });
     });
 
     it('rejects other synthetic turn ids even with a sender-ful registry entry', () => {

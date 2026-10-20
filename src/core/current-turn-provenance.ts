@@ -34,6 +34,7 @@ interface PersistedTurnSession {
   /** Recovery state markers consulted by registryTurnMayAuthenticateHuman. */
   ordinaryTurnRecovery?: { logicalTurnId: string; currentTurnId: string };
   failedTurnRecovery?: { turnId: string };
+  readonlyTaskContinuation?: { logicalTurnId: string; currentTurnId: string };
 }
 
 export interface CurrentTurnProvenance {
